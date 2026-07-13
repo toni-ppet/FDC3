@@ -9,6 +9,7 @@ import {
   AppMetadata,
   ImplementationMetadata,
   CloseError,
+  InstanceMetadata,
 } from '@finos/fdc3-standard';
 import { BrowserTypes } from '@finos/fdc3-schema';
 import { errorResponse, FullAppIdentifier, successResponse } from './support.js';
@@ -22,6 +23,7 @@ import {
   isGetInfoRequest,
   isOpenRequest,
   isCloseRequest,
+  isUpdateInstanceMetadataRequest,
   isWebConnectionProtocol4ValidateAppIdentity,
 } from '@finos/fdc3-schema/dist/generated/api/BrowserTypes.js';
 import { DetachedSignature } from '@finos/fdc3-schema/generated/bridging/BridgingTypes.js';
@@ -32,6 +34,7 @@ type FindInstancesRequest = BrowserTypes.FindInstancesRequest;
 type GetAppMetadataRequest = BrowserTypes.GetAppMetadataRequest;
 type OpenRequest = BrowserTypes.OpenRequest;
 type CloseRequest = BrowserTypes.CloseRequest;
+type UpdateInstanceMetadataRequest = BrowserTypes.UpdateInstanceMetadataRequest;
 type WebConnectionProtocol4ValidateAppIdentity = BrowserTypes.WebConnectionProtocol4ValidateAppIdentity;
 type WebConnectionProtocol5ValidateAppIdentityFailedResponse =
   BrowserTypes.WebConnectionProtocol5ValidateAppIdentityFailedResponse;
@@ -150,6 +153,8 @@ export class OpenHandler implements MessageHandler {
             return this.getInfo(msg, sc, from);
           } else if (isCloseRequest(msg)) {
             return this.close(msg, sc, from);
+          } else if (isUpdateInstanceMetadataRequest(msg)) {
+            return this.updateInstanceMetadata(msg, sc, from);
           }
         } catch (e) {
           const responseType = msg.type.replace(new RegExp('Request$'), 'Response') as AgentResponseMessage['type'];
@@ -209,7 +214,7 @@ export class OpenHandler implements MessageHandler {
     }
   }
 
-  filterPublicDetails(appD: DirectoryApp, appID: AppIdentifier): AppMetadata {
+  filterPublicDetails(appD: DirectoryApp, appID: AppIdentifier, instanceMetadata?: InstanceMetadata): AppMetadata {
     return {
       appId: appD.appId,
       version: appD.version,
@@ -219,6 +224,7 @@ export class OpenHandler implements MessageHandler {
       icons: appD.icons,
       screenshots: appD.screenshots,
       instanceId: appID.instanceId,
+      ...(instanceMetadata && { instanceMetadata }),
     };
   }
 
@@ -226,12 +232,17 @@ export class OpenHandler implements MessageHandler {
     const appID = arg0.payload.app;
     const details = this.directory.retrieveAppsById(appID.appId);
     if (details.length > 0) {
+      let instanceMetadata: InstanceMetadata | undefined;
+      if (appID.instanceId) {
+        const registration = sc.getInstanceDetails(appID.instanceId);
+        instanceMetadata = registration?.instanceMetadata;
+      }
       successResponse(
         sc,
         arg0,
         from,
         {
-          appMetadata: this.filterPublicDetails(details[0], appID),
+          appMetadata: this.filterPublicDetails(details[0], appID, instanceMetadata),
         },
         'getAppMetadataResponse'
       );
@@ -250,9 +261,11 @@ export class OpenHandler implements MessageHandler {
     const matching = openApps
       .filter(a => a.appId == appId)
       .map(a => {
+        const instanceMetadata = sc.getInstanceDetails(a.instanceId)?.instanceMetadata;
         return {
           appId: a.appId,
           instanceId: a.instanceId,
+          ...(instanceMetadata && { instanceMetadata }),
         };
       });
     successResponse(
@@ -315,8 +328,34 @@ export class OpenHandler implements MessageHandler {
     }
   }
 
+  updateInstanceMetadata(
+    arg0: UpdateInstanceMetadataRequest,
+    sc: ServerContext<AppRegistration>,
+    from: FullAppIdentifier
+  ): void {
+    const details = sc.getInstanceDetails(from.instanceId);
+    if (details) {
+      details.instanceMetadata = {
+        ...details.instanceMetadata,
+        ...arg0.payload.instanceMetadata,
+      };
+      sc.setInstanceDetails(from.instanceId, details);
+      successResponse(sc, arg0, from, {}, 'updateInstanceMetadataResponse');
+    } else {
+      errorResponse(sc, arg0, from, ResolveError.TargetInstanceUnavailable, 'updateInstanceMetadataResponse');
+    }
+  }
+
   getImplementationMetadata(sc: ServerContext<AppRegistration>, appIdentity: AppIdentifier) {
-    const appMetadata = this.filterPublicDetails(this.directory.retrieveAppsById(appIdentity.appId)[0], appIdentity);
+    let instanceMetadata: InstanceMetadata | undefined;
+    if (appIdentity.instanceId) {
+      instanceMetadata = sc.getInstanceDetails(appIdentity.instanceId)?.instanceMetadata;
+    }
+    const appMetadata = this.filterPublicDetails(
+      this.directory.retrieveAppsById(appIdentity.appId)[0],
+      appIdentity,
+      instanceMetadata
+    );
     return {
       provider: sc.provider(),
       providerVersion: sc.providerVersion(),
